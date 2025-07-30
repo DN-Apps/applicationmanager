@@ -1,0 +1,28 @@
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 200px);
+  grid-template-rows: repeat(2, 200px);
+  gap: 20px;
+  justify-content: center;
+  align-items: center;
+  min-height: 60vh;
+}
+
+.tile {
+  background-color: #888787;
+  border-radius: 12px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 1.2rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: transform 0.2s ease, background-color 0.3s ease;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+  min-height: 20vh;
+}
+
+.tile:hover {
+  transform: translateY(-5px);
+  background-color: #e0e0e0;
+}

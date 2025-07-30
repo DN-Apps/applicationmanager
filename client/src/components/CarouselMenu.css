@@ -1,0 +1,109 @@
+.carousel-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  position: relative;
+}
+
+.carousel-track {
+  position: relative;
+  width: 80%;
+  height: 300px;
+  perspective: 1000px;
+  transform-style: preserve-3d;
+}
+
+/* Optional: Hintergrundlinie dezent halten */
+.carousel-track::before {
+  border-color: rgba(97, 218, 251, 0.15);
+}
+
+.carousel-item {
+  position: absolute;
+  width: 200px;
+  height: 100px;
+  left: 50%;
+  top: 50%;
+  transform: translateX(-50%) translateY(-50%)
+    rotateY(calc(var(--pos) * (360deg / var(--total-items)))) translateZ(300px);
+  transition: transform 0.5s ease, opacity 0.3s ease;
+  cursor: pointer;
+}
+
+.item-box {
+  background: rgba(255, 255, 255, 0.1);
+  border: 2px solid #61dafb;
+  border-radius: 8px;
+  padding: 20px;
+  text-align: center;
+  backdrop-filter: blur(5px);
+  transition: all 0.3s;
+  color: white;
+}
+
+.carousel-item.active .item-box {
+  background: rgba(97, 218, 251, 0.9); /* 90% Deckkraft statt 30% */
+  border: 2px solid white;
+  color: #0a0e24; /* Dunkler Text für bessere Lesbarkeit */
+  transform: scale(1.3); /* Stärkere Hervorhebung */
+  box-shadow: 0 0 25px rgba(255, 255, 255, 0.8), 0 0 15px #61dafb inset;
+  backdrop-filter: none; /* Keine Unschärfe beim aktiven Element */
+  font-weight: bold;
+}
+
+/* Inaktive Elemente transparenter */
+.carousel-item:not(.active) .item-box {
+  background: rgba(255, 255, 255, 0.05); /* Fast unsichtbar */
+  border-color: rgba(97, 218, 251, 0.3);
+}
+
+/* Zusätzliche 3D-Tiefe für aktives Element */
+.carousel-item.active {
+  z-index: 100;
+  filter: drop-shadow(0 0 12px rgba(97, 218, 251, 0.9));
+}
+
+.nav-arrow {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 3rem;
+  cursor: pointer;
+  padding: 0 20px;
+  z-index: 10;
+  transition: transform 0.2s;
+}
+
+.nav-arrow:hover {
+  transform: scale(1.2);
+  color: #61dafb;
+}
+
+/* Elliptische Führungslinie */
+.carousel-track::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 800px;
+  height: 300px;
+  border: 1px dashed rgba(97, 218, 251, 0.3);
+  border-radius: 50%;
+  transform: translate(-50%, -50%) rotateX(60deg);
+  pointer-events: none;
+}
+
+@media (max-width: 768px) {
+  .carousel-track::before {
+    width: 500px;
+    height: 200px;
+  }
+
+  .nav-arrow {
+    margin: 0 1rem;
+    font-size: 2rem;
+  }
+}

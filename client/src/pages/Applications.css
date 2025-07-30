@@ -1,0 +1,70 @@
+.applications-container {
+  display: flex;
+  height: 100vh;
+  font-family: Arial, sans-serif;
+}
+
+.sidebar {
+  width: 250px;
+  background: #f5f5f5;
+  padding: 20px;
+  border-right: 1px solid #ddd;
+  color: black;
+}
+
+.app-btn {
+  display: block;
+  background: none;
+  border: none;
+  padding: 10px;
+  margin-bottom: 5px;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+}
+
+.app-btn.active {
+  background: #007bff;
+  color: white;
+}
+
+.main {
+  flex: 1;
+  padding: 20px;
+}
+
+.tabs {
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+.tab-btn {
+  margin-right: 5px;
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  background: #f8f8f8;
+  cursor: pointer;
+}
+
+.tab-btn.active {
+  background: #007bff;
+  color: white;
+  border-color: #0056b3;
+}
+
+.config-details pre {
+  background: #f1f1f1;
+  padding: 15px;
+  border-radius: 5px;
+  color: black;
+}
+
+.config-entry {
+  background: #f1f1f1;
+  padding: 15px;
+  margin-bottom: 10px;
+  border-radius: 5px;
+  color: black;
+  font-size: 14px;
+  line-height: 1.6;
+}

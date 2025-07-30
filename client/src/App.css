@@ -1,0 +1,60 @@
+.App {
+  text-align: center;
+}
+
+.main-content {
+  padding: 2rem;
+}
+
+/* Optional: Sterne-Effekt */
+@keyframes twinkle {
+  0% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.2;
+  }
+}
+
+.star {
+  position: absolute;
+  background: white;
+  border-radius: 50%;
+  animation: twinkle 3s infinite;
+}
+
+/* Basis-Styles */
+.app-container {
+  min-height: 100vh;
+  background: radial-gradient(ellipse at center, #0a0e24 0%, #000000 100%);
+  color: white;
+}
+
+.app-title {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: white;
+  text-decoration: none;
+  z-index: 100;
+}
+
+.app-title:hover {
+  text-shadow: 0 0 10px #61dafb;
+}
+
+.menu-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+
+.page {
+  padding: 100px 20px 20px;
+  text-align: center;
+}
