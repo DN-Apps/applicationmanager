@@ -10,7 +10,10 @@ function Login({ onLogin }) {
     const handleSubmit = async e => {
         e.preventDefault();
         try {
-            const res = await axios.post(`${API_URL}/api/auth/login`, { username, password });
+            console.log('API_URL:', process.env.REACT_APP_API_URL);
+
+
+            const res = await axios.post(`${API_URL}/auth/login`, { username, password });
             localStorage.setItem('token', res.data.token);
             onLogin(); // Erfolg
         } catch (err) {
