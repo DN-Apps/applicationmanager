@@ -1,0 +1,18 @@
+# Node / build
+frontend/node_modules/
+frontend/build/
+backend/node_modules/
+
+# Env / Secrets
+*.env
+*.env.*
+!example.env
+backend/.env*
+frontend/.env*
+
+# System/OS
+**/.DS_Store
+**/Thumbs.db
+
+# Logs
+**/*.log
