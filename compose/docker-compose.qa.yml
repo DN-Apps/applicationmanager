@@ -1,0 +1,57 @@
+version: "3.8"
+
+volumes:
+volumes:
+  appmanager_db_data:
+
+services:
+  # --- MySQL ---
+  qa-appmanager-db:
+    image: mysql:8.0
+    container_name: qa-appmanager-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASS}
+    command:
+      - "--default-authentication-plugin=mysql_native_password"
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+    volumes:
+      - appmanager_db_data:/var/lib/mysql
+      - ../db-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - proxy_net
+
+  # --- Node.js Backend ---
+  qa-appmanager-backend:
+    image: ghcr.io/DN-Apps/appmanager-backend:qa   # <— statt build:
+    container_name: qa-appmanager-backend
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env.qa
+    depends_on:
+      - qa-appmanager-db
+    networks:
+      - proxy_net
+    expose:
+      - "5000"
+    pull_policy: always
+
+  # --- React Frontend ---
+  qa-appmanager-frontend:
+    image: ghcr.io/DN-Apps/appmanager-frontend:qa  # <— statt build:
+    container_name: qa-appmanager-frontend
+    restart: unless-stopped
+    networks:
+      - proxy_net
+    expose:
+      - "80"
+    pull_policy: always
+
+networks:
+  proxy_net:
+    external: true
+
