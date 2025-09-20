@@ -28,10 +28,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      # Owner kleinschreiben und Image-Namen im JOB setzen
       - name: Set image names
         run: |
-          echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
           echo "IMAGE_BACKEND=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/appmanager-backend" >> $GITHUB_ENV
 
       - name: Login to GHCR (for push)
@@ -58,10 +56,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
-      # Owner kleinschreiben und Image-Namen im JOB setzen
       - name: Set image names
         run: |
-          echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
           echo "IMAGE_FRONTEND=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/appmanager-frontend" >> $GITHUB_ENV
 
       - name: Login to GHCR (for push)
@@ -84,7 +80,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-    deploy-qa:
+  deploy-qa:
     needs: [ build-backend, build-frontend ]
     runs-on: ubuntu-latest
     steps:
@@ -99,47 +95,46 @@ jobs:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          QA_URL: ${{ env.QA_API_URL }}
-          OWNER_RAW: ${{ github.repository_owner }}
         run: |
-          ssh -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" "
-            set -e
+          # Übergib Variablen in die Remote-Session und nutze einen Heredoc (kein Quote-Chaos)
+          ssh -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" "REGISTRY_USER='$REGISTRY_USER' GHCR_TOKEN='$GHCR_TOKEN' QA_URL='${{ env.QA_API_URL }}' bash -s" <<'EOSH'
+          set -e
 
-            OWNER_LC=\$(echo \"$OWNER_RAW\" | tr '[:upper:]' '[:lower:]')
-            COMPOSE='/srv/docker/qa/applicationmanager/compose/docker-compose.qa.yml'
+          COMPOSE="/srv/docker/qa/applicationmanager/compose/docker-compose.qa.yml"
 
-            # Vorherige laufende Image-IDs sichern (für Rollback)
-            PREV_BACKEND=\$(docker inspect -f '{{.Image}}' qa-appmanager-backend 2>/dev/null || true)
-            PREV_FRONTEND=\$(docker inspect -f '{{.Image}}' qa-appmanager-frontend 2>/dev/null || true)
-            echo \"Prev: BACKEND=\$PREV_BACKEND FRONTEND=\$PREV_FRONTEND\"
+          # Vorherige Images (ID) und aktuell verwendete Image-Namen sichern
+          PREV_BACKEND=$(docker inspect -f '{{.Image}}' qa-appmanager-backend 2>/dev/null || true)
+          PREV_FRONTEND=$(docker inspect -f '{{.Image}}' qa-appmanager-frontend 2>/dev/null || true)
+          CUR_BACKEND_NAME=$(docker inspect -f '{{.Config.Image}}' qa-appmanager-backend 2>/dev/null || true)
+          CUR_FRONTEND_NAME=$(docker inspect -f '{{.Config.Image}}' qa-appmanager-frontend 2>/dev/null || true)
+          echo "Prev IDs: BACKEND=$PREV_BACKEND FRONTEND=$PREV_FRONTEND"
+          echo "Current tags: BACKEND=$CUR_BACKEND_NAME FRONTEND=$CUR_FRONTEND_NAME"
 
-            # Login & reguläres Update
-            echo \$GHCR_TOKEN | docker login ghcr.io -u \"\$REGISTRY_USER\" --password-stdin
-            docker compose -f \"\$COMPOSE\" pull
-            docker compose -f \"\$COMPOSE\" up -d
+          # Login & Update
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+          docker compose -f "$COMPOSE" pull
+          docker compose -f "$COMPOSE" up -d
 
-            # Externe Healthchecks (mehrfach versuchen)
-            ok_backend=false
-            ok_front=false
-            for i in 1 2 3 4 5 6; do
-              if curl -fsS \"${QA_URL}/api/health\" | grep -q '\"status\":\"ok\"'; then ok_backend=true; fi
-              if curl -fsSI \"${QA_URL}/\" | head -n1 | grep -q '200'; then ok_front=true; fi
-              \$ok_backend && \$ok_front && break
-              sleep 5
-            done
+          # Externe Healthchecks (mehrfach versuchen)
+          ok_backend=false
+          ok_front=false
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "$QA_URL/api/health" | grep -q '"status":"ok"'; then ok_backend=true; fi
+            if curl -fsSI "$QA_URL/" | head -n1 | grep -q '200'; then ok_front=true; fi
+            $ok_backend && $ok_front && break
+            sleep 5
+          done
 
-            if ! \$ok_backend || ! \$ok_front; then
-              echo 'Deploy unhealthy -> ROLLBACK'
+          if ! $ok_backend || ! $ok_front; then
+            echo "Deploy unhealthy -> ROLLBACK"
+            # :qa lokal zurück auf vorherige Images taggen (anhand der vorherigen Container-Images)
+            if [ -n "$PREV_BACKEND" ] && [ -n "$CUR_BACKEND_NAME" ]; then docker tag "$PREV_BACKEND" "$CUR_BACKEND_NAME"; fi
+            if [ -n "$PREV_FRONTEND" ] && [ -n "$CUR_FRONTEND_NAME" ]; then docker tag "$PREV_FRONTEND" "$CUR_FRONTEND_NAME"; fi
 
-              # :qa lokal auf frühere Images retaggen
-              if [ -n \"\$PREV_BACKEND\" ]; then docker tag \"\$PREV_BACKEND\" ghcr.io/\$OWNER_LC/appmanager-backend:qa; fi
-              if [ -n \"\$PREV_FRONTEND\" ]; then docker tag \"\$PREV_FRONTEND\" ghcr.io/\$OWNER_LC/appmanager-frontend:qa; fi
+            # Beim Rollback kein Pull erzwingen
+            docker compose -f "$COMPOSE" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
+            exit 1  # Job rot markieren
+          fi
 
-              # Wichtig: beim Rollback kein Pull erzwingen (override pull_policy)
-              docker compose -f \"\$COMPOSE\" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
-
-              exit 1  # Job rot markieren
-            fi
-
-            echo 'Deploy healthy'
-          "
+          echo "Deploy healthy"
+          EOSH
