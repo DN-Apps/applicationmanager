@@ -95,6 +95,8 @@ jobs:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          # Optional: Falls dein NPM-Container einen festen Namen hat, hier setzen:
+          # NPM_CONTAINER_OVERRIDE: nginx-proxy-app-1
         run: |
           # Variablen in die Remote-Session übergeben; Heredoc verhindert Local-Shell-Expansion
           ssh -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" "REGISTRY_USER='$REGISTRY_USER' GHCR_TOKEN='$GHCR_TOKEN' QA_URL='${{ env.QA_API_URL }}' bash -s" <<'EOSH'
@@ -143,13 +145,21 @@ jobs:
             echo "Container intern nicht ready -> ROLLBACK"
             if [ -n "$PREV_BACKEND" ] && [ -n "$CUR_BACKEND_NAME" ]; then docker tag "$PREV_BACKEND" "$CUR_BACKEND_NAME"; fi
             if [ -n "$PREV_FRONTEND" ] && [ -n "$CUR_FRONTEND_NAME" ]; then docker tag "$PREV_FRONTEND" "$CUR_FRONTEND_NAME"; fi
-
             docker compose -f "$COMPOSE" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
             exit 1
           fi
 
           # -------- 2) Nginx Proxy Manager kurz neu starten (Upstream/DNS-Refresh) --------
-          NPM_CONTAINER="${NPM_CONTAINER_OVERRIDE:-$(docker ps --format '{{.Names}} {{.Image}}' | awk '/nginx-proxy/ || /jc21\\/nginx-proxy-manager/ {print $1; exit}')}"
+          # Robust: optional Override, sonst per grep suchen; set +e, damit kein sofortiger Abbruch
+          set +e
+          NPM_CONTAINER="$NPM_CONTAINER_OVERRIDE"
+          if [ -z "$NPM_CONTAINER" ]; then
+            NPM_CONTAINER=$(docker ps --format '{{.Names}} {{.Image}}' \
+              | grep -E -m1 'nginx-proxy|jc21/nginx-proxy-manager' \
+              | awk '{print $1}')
+          fi
+          set -e
+
           if [ -n "$NPM_CONTAINER" ]; then
             echo "Neustart NPM ($NPM_CONTAINER)…"
             docker restart "$NPM_CONTAINER" || true
@@ -184,7 +194,6 @@ jobs:
             echo "Deploy unhealthy -> ROLLBACK"
             if [ -n "$PREV_BACKEND" ] && [ -n "$CUR_BACKEND_NAME" ]; then docker tag "$PREV_BACKEND" "$CUR_BACKEND_NAME"; fi
             if [ -n "$PREV_FRONTEND" ] && [ -n "$CUR_FRONTEND_NAME" ]; then docker tag "$PREV_FRONTEND" "$CUR_FRONTEND_NAME"; fi
-
             docker compose -f "$COMPOSE" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
             exit 1
           fi
