@@ -1,40 +1,33 @@
-# --- Build-Stage ---
+# frontend/Dockerfile
+
+# --- Build stage ---
 FROM node:18-alpine AS build
 WORKDIR /app
 
-# 1. Nur package.json / lockfiles kopieren
+# Nur Manifest(e) kopieren & reproduzierbar installieren
 COPY package*.json ./
+RUN npm ci
 
-# 2. Abhängigkeiten installieren (inkl. devDependencies für Build)
-RUN npm install
-
-# 3. Restlichen Code kopieren
+# Restlichen Code kopieren
 COPY . .
 
-# 4. API-URL als Build-Argument (eine Quelle)
+# API-URL als Build-Arg -> env für CRA
 ARG API_PUBLIC_URL
-# Beide gängige CRA-Variablen setzen – egal welche dein Code nutzt:
-ENV REACT_APP_API_BASE_URL=$API_PUBLIC_URL
 ENV REACT_APP_API_URL=$API_PUBLIC_URL
+ENV REACT_APP_API_BASE_URL=$API_PUBLIC_URL
 
-# 5. Rechte für react-scripts setzen
-RUN chmod +x node_modules/.bin/react-scripts
-
-# 6. Build mit direktem Aufruf (um PATH-Probleme zu vermeiden)
+# Build
 RUN ./node_modules/.bin/react-scripts build
 
-# --- Runtime-Stage ---
+# --- Runtime stage ---
 FROM nginx:alpine
 
-# Standard-Inhalt entfernen
-RUN rm -rf /usr/share/nginx/html/*
+# Eigene Nginx-Config mit SPA-Fallback
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Build-Ergebnis aus erster Stage übernehmen
+# Statisches Build deployen
 COPY --from=build /app/build /usr/share/nginx/html
 
-# Healthcheck (prüft, ob App läuft)
 HEALTHCHECK CMD wget -qO- http://localhost:80/ >/dev/null || exit 1
-
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
-
