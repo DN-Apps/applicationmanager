@@ -96,7 +96,7 @@ jobs:
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
-          # Übergib Variablen in die Remote-Session und nutze einen Heredoc (kein Quote-Chaos)
+          # Variablen in die Remote-Session übergeben; Heredoc verhindert Local-Shell-Expansion
           ssh -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" "REGISTRY_USER='$REGISTRY_USER' GHCR_TOKEN='$GHCR_TOKEN' QA_URL='${{ env.QA_API_URL }}' bash -s" <<'EOSH'
           set -e
 
@@ -115,25 +115,78 @@ jobs:
           docker compose -f "$COMPOSE" pull
           docker compose -f "$COMPOSE" up -d
 
-          # Externe Healthchecks (mehrfach versuchen)
+          # -------- 1) Interne Healthchecks (ohne NPM) --------
+          echo "Warte auf Container (intern)…"
+          fe_ok=false
+          be_ok=false
+          for i in {1..24}; do
+            if docker exec qa-appmanager-frontend sh -lc 'wget -qO- http://127.0.0.1/ >/dev/null'; then
+              fe_ok=true
+            else
+              fe_ok=false
+            fi
+
+            if docker exec qa-appmanager-backend sh -lc 'wget -qO- http://127.0.0.1:5000/api/health 2>/dev/null' | grep -q '"status":"ok"'; then
+              be_ok=true
+            else
+              be_ok=false
+            fi
+
+            if $fe_ok && $be_ok; then
+              echo "Interne Checks: OK"
+              break
+            fi
+            sleep 5
+          done
+
+          if ! $fe_ok || ! $be_ok; then
+            echo "Container intern nicht ready -> ROLLBACK"
+            if [ -n "$PREV_BACKEND" ] && [ -n "$CUR_BACKEND_NAME" ]; then docker tag "$PREV_BACKEND" "$CUR_BACKEND_NAME"; fi
+            if [ -n "$PREV_FRONTEND" ] && [ -n "$CUR_FRONTEND_NAME" ]; then docker tag "$PREV_FRONTEND" "$CUR_FRONTEND_NAME"; fi
+
+            docker compose -f "$COMPOSE" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
+            exit 1
+          fi
+
+          # -------- 2) Nginx Proxy Manager kurz neu starten (Upstream/DNS-Refresh) --------
+          NPM_CONTAINER="${NPM_CONTAINER_OVERRIDE:-$(docker ps --format '{{.Names}} {{.Image}}' | awk '/nginx-proxy/ || /jc21\\/nginx-proxy-manager/ {print $1; exit}')}"
+          if [ -n "$NPM_CONTAINER" ]; then
+            echo "Neustart NPM ($NPM_CONTAINER)…"
+            docker restart "$NPM_CONTAINER" || true
+            sleep 5
+          else
+            echo "Hinweis: Kein NPM-Container automatisch gefunden – überspringe Restart."
+          fi
+
+          # -------- 3) Externe Healthchecks (über Domain/HTTPS) --------
+          echo "Externe Healthchecks…"
           ok_backend=false
           ok_front=false
-          for i in 1 2 3 4 5 6; do
-            if curl -fsS "$QA_URL/api/health" | grep -q '"status":"ok"'; then ok_backend=true; fi
-            if curl -fsSI "$QA_URL/" | head -n1 | grep -q '200'; then ok_front=true; fi
+          for i in {1..24}; do
+            if curl -fsS "$QA_URL/api/health" | grep -q '"status":"ok"'; then
+              ok_backend=true
+            else
+              ok_backend=false
+            fi
+
+            # 200 im Status (Follow redirects)
+            if curl -fsSIL "$QA_URL/" | head -n1 | grep -q ' 200 '; then
+              ok_front=true
+            else
+              ok_front=false
+            fi
+
             $ok_backend && $ok_front && break
             sleep 5
           done
 
           if ! $ok_backend || ! $ok_front; then
             echo "Deploy unhealthy -> ROLLBACK"
-            # :qa lokal zurück auf vorherige Images taggen (anhand der vorherigen Container-Images)
             if [ -n "$PREV_BACKEND" ] && [ -n "$CUR_BACKEND_NAME" ]; then docker tag "$PREV_BACKEND" "$CUR_BACKEND_NAME"; fi
             if [ -n "$PREV_FRONTEND" ] && [ -n "$CUR_FRONTEND_NAME" ]; then docker tag "$PREV_FRONTEND" "$CUR_FRONTEND_NAME"; fi
 
-            # Beim Rollback kein Pull erzwingen
             docker compose -f "$COMPOSE" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
-            exit 1  # Job rot markieren
+            exit 1
           fi
 
           echo "Deploy healthy"
