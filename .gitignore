@@ -6,7 +6,7 @@ backend/node_modules/
 # Env / Secrets
 *.env
 *.env.*
-!example.env
+!.env.example
 backend/.env*
 frontend/.env*
 
