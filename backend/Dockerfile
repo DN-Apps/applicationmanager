@@ -1,4 +1,4 @@
-# --- Build-Stage ---
+# --- Build-Stage ----
 FROM node:18-alpine AS build
 
 # Systempakete für bcrypt kompilieren
