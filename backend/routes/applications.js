@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 
 // Registry-DB (enthält managed_applications / managed_tables)
-const registryDb = require('../db');          // mysql2/promise Pool
+const registryDb = require('../db');          // mysql2/promise-Pool
 // Ziel-DB Pools pro App (Multi-DB)
 const { getPool } = require('../dbMulti');
 
@@ -11,6 +11,7 @@ const { getPool } = require('../dbMulti');
 const IDENT_RX = /^[A-Za-z0-9_]+$/;
 const safeIdent = (s) => IDENT_RX.test(s || '') ? s : null;
 const qIdent = (s) => `\`${s}\``;
+const toNullIfEmpty = (v) => (v === '' ? null : v);
 
 // App + Table aus Registry (Whitelist) holen
 async function getAppAndTable(appKey, tableName = null) {
@@ -123,14 +124,14 @@ router.get('/:appKey/tables/:table/rows', async (req, res) => {
     });
   } catch (err) {
     console.error('[ROWS][LIST]', err);
-    res.status(500).json({ error: 'Failed to load rows', details: err.message });
+    res.status(500).json({ error: 'Failed to load rows', details: err.sqlMessage || err.message });
   }
 });
 
 // CREATE (Ziel-DB)
 router.post('/:appKey/tables/:table/rows', async (req, res) => {
   const { appKey, table } = req.params;
-  const data = req.body || {};
+  const incoming = req.body || {};
   try {
     const { app, tbl, error, status } = await getAppAndTable(appKey, table);
     if (error) return res.status(status).json({ error });
@@ -141,14 +142,18 @@ router.post('/:appKey/tables/:table/rows', async (req, res) => {
       user: app.db_user, pass: app.db_pass
     });
 
-    // nur existierende Spalten zulassen
+    // Spalten ermitteln
     const [cols] = await pool.query(
       `SHOW COLUMNS FROM ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)}`
     );
     const allowed = new Set(cols.map(c => c.Field));
+
+    // Payload bauen: nur existierende Spalten, PK weglassen, '' -> null
     const payload = {};
-    for (const [k, v] of Object.entries(data)) {
-      if (allowed.has(k) && k !== tbl.primary_key_col) payload[k] = v;
+    for (const [k, v] of Object.entries(incoming)) {
+      if (!allowed.has(k)) continue;
+      if (k === tbl.primary_key_col) continue;
+      payload[k] = toNullIfEmpty(v);
     }
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ error: 'No valid columns in payload' });
@@ -161,14 +166,14 @@ router.post('/:appKey/tables/:table/rows', async (req, res) => {
     res.status(201).json({ id: result.insertId });
   } catch (err) {
     console.error('[ROW][CREATE]', err);
-    res.status(500).json({ error: 'Insert failed', details: err.message });
+    res.status(500).json({ error: 'Insert failed', details: err.sqlMessage || err.message });
   }
 });
 
 // UPDATE (Ziel-DB)
 router.put('/:appKey/tables/:table/rows/:id', async (req, res) => {
   const { appKey, table, id } = req.params;
-  const data = req.body || {};
+  const incoming = req.body || {};
   try {
     const { app, tbl, error, status } = await getAppAndTable(appKey, table);
     if (error) return res.status(status).json({ error });
@@ -183,18 +188,19 @@ router.put('/:appKey/tables/:table/rows/:id', async (req, res) => {
       `SHOW COLUMNS FROM ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)}`
     );
     const allowed = new Set(cols.map(c => c.Field));
-    const keys = Object.keys(data).filter(k => allowed.has(k) && k !== tbl.primary_key_col);
+
+    const keys = Object.keys(incoming).filter(k => allowed.has(k) && k !== tbl.primary_key_col);
     if (keys.length === 0) return res.status(400).json({ error: 'No valid columns to update' });
 
     const setSql = keys.map(k => `${qIdent(k)}=?`).join(', ');
-    const vals = keys.map(k => data[k]);
+    const vals = keys.map(k => toNullIfEmpty(incoming[k]));
 
     const sql = `UPDATE ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)} SET ${setSql} WHERE ${qIdent(tbl.primary_key_col)}=?`;
     await pool.query(sql, [...vals, id]);
     res.json({ ok: true });
   } catch (err) {
     console.error('[ROW][UPDATE]', err);
-    res.status(500).json({ error: 'Update failed', details: err.message });
+    res.status(500).json({ error: 'Update failed', details: err.sqlMessage || err.message });
   }
 });
 
@@ -218,7 +224,7 @@ router.delete('/:appKey/tables/:table/rows/:id', async (req, res) => {
     res.status(204).send();
   } catch (err) {
     console.error('[ROW][DELETE]', err);
-    res.status(500).json({ error: 'Delete failed', details: err.message });
+    res.status(500).json({ error: 'Delete failed', details: err.sqlMessage || err.message });
   }
 });
 
