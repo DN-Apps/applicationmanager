@@ -60,7 +60,7 @@ jobs:
       - name: Upload backend digest artifact
         uses: actions/upload-artifact@v4
         with:
-          name: qa-digests
+          name: qa-digest-backend
           path: backend.digest
 
   build-frontend:
@@ -102,7 +102,7 @@ jobs:
       - name: Upload frontend digest artifact
         uses: actions/upload-artifact@v4
         with:
-          name: qa-digests
+          name: qa-digest-frontend
           path: frontend.digest
 
   deploy-qa:
