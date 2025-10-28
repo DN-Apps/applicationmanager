@@ -23,7 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # QA-Digests holen
+      # Owner lowercase ableiten (Docker-Refs dürfen nur lowercase sein)
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      # QA-Digests aus vorherigem QA-Run laden (zwei Artefakte)
       - name: Download QA digests
         uses: actions/download-artifact@v4
         with:
@@ -31,7 +35,6 @@ jobs:
           merge-multiple: true
 
       - name: Read digests
-        id: dig
         run: |
           echo "BE_DIGEST=$(cat backend.digest)" >> $GITHUB_ENV
           echo "FE_DIGEST=$(cat frontend.digest)" >> $GITHUB_ENV
@@ -46,8 +49,8 @@ jobs:
       # Backend promote
       - name: Promote backend image to prod
         run: |
-          SRC="ghcr.io/${{ github.repository_owner }}/appmanager-backend@${BE_DIGEST}"
-          REPO="ghcr.io/${{ github.repository_owner }}/appmanager-backend"
+          SRC="ghcr.io/${OWNER_LC}/appmanager-backend@${BE_DIGEST}"
+          REPO="ghcr.io/${OWNER_LC}/appmanager-backend"
           docker pull "$SRC"
           docker tag "$SRC" "$REPO:prod"
           docker tag "$SRC" "$REPO:${GITHUB_SHA::12}"
@@ -57,11 +60,11 @@ jobs:
       # Frontend promote
       - name: Promote frontend image to prod
         run: |
-          SRC="ghcr.io/${{ github.repository_owner }}/appmanager-frontend@${FE_DIGEST}"
-          REPO="ghcr.io/${{ github.repository_owner }}/appmanager-frontend"
+          SRC="ghcr.io/${OWNER_LC}/appmanager-frontend@${FE_DIGEST}"
+          REPO="ghcr.io/${OWNER_LC}/appmanager-frontend"
           docker pull "$SRC"
           docker tag "$SRC" "$REPO:prod"
-          docker tag "$SRC:${GITHUB_SHA::12}"
+          docker tag "$SRC" "$REPO:${GITHUB_SHA::12}"
           docker push "$REPO:prod"
           docker push "$REPO:${GITHUB_SHA::12}"
 
@@ -102,16 +105,18 @@ jobs:
           echo "Waiting internal health..."
           fe_ok=false ; be_ok=false
           for i in {1..24}; do
-            docker compose -f "$COMPOSE" exec -T prod-appmanager-frontend  sh -lc 'wget -qO- http://127.0.0.1/ >/dev/null' && fe_ok=true
-            docker compose -f "$COMPOSE" exec -T prod-appmanager-backend   sh -lc 'wget -qO- http://127.0.0.1:5000/api/health' | grep -q '"status":"ok"' && be_ok=true
+            docker compose -f "$COMPOSE" exec -T prod-appmanager-frontend  sh -lc 'wget -qO- http://127.0.0.1/ >/dev/null' && fe_ok=true || fe_ok=false
+            docker compose -f "$COMPOSE" exec -T prod-appmanager-backend   sh -lc 'wget -qO- http://127.0.0.1:5000/api/health' | grep -q '"status":"ok"' && be_ok=true || be_ok=false
             $fe_ok && $be_ok && break
             sleep 5
           done
 
           if ! $fe_ok || ! $be_ok; then
             echo "Rollback!"
-            [ -n "$PREV_BE" ] && docker tag "$PREV_BE" "$(docker compose -f "$COMPOSE" config | awk '/appmanager-backend/{print $2; exit}')"
-            [ -n "$PREV_FE" ] && docker tag "$PREV_FE" "$(docker compose -f "$COMPOSE" config | awk '/appmanager-frontend/{print $2; exit}')"
+            CUR_BE=$(docker compose -f "$COMPOSE" config | awk '/image: .*appmanager-backend/{print $2; exit}')
+            CUR_FE=$(docker compose -f "$COMPOSE" config | awk '/image: .*appmanager-frontend/{print $2; exit}')
+            [ -n "$PREV_BE" ] && [ -n "$CUR_BE" ] && docker tag "$PREV_BE" "$CUR_BE"
+            [ -n "$PREV_FE" ] && [ -n "$CUR_FE" ] && docker tag "$PREV_FE" "$CUR_FE"
             docker compose -f "$COMPOSE" up -d
             exit 1
           fi
@@ -119,16 +124,18 @@ jobs:
           echo "External checks..."
           ok_fe=false ; ok_be=false
           for i in {1..24}; do
-            curl -fsS "$PROD_URL/api/health" | grep -q '"status":"ok"' && ok_be=true
-            curl -fsSIL "$PROD_URL/" | head -n1 | grep -q ' 200 ' && ok_fe=true
+            curl -fsS "$PROD_URL/api/health" | grep -q '"status":"ok"' && ok_be=true || ok_be=false
+            curl -fsSIL "$PROD_URL/" | head -n1 | grep -q ' 200 ' && ok_fe=true || ok_fe=false
             $ok_fe && $ok_be && break
             sleep 5
           done
 
           if ! $ok_fe || ! $ok_be; then
             echo "Rollback ext!"
-            [ -n "$PREV_BE" ] && docker tag "$PREV_BE" "$(docker compose -f "$COMPOSE" config | awk '/appmanager-backend/{print $2; exit}')"
-            [ -n "$PREV_FE" ] && docker tag "$PREV_FE" "$(docker compose -f "$COMPOSE" config | awk '/appmanager-frontend/{print $2; exit}')"
+            CUR_BE=$(docker compose -f "$COMPOSE" config | awk '/image: .*appmanager-backend/{print $2; exit}')
+            CUR_FE=$(docker compose -f "$COMPOSE" config | awk '/image: .*appmanager-frontend/{print $2; exit}')
+            [ -n "$PREV_BE" ] && [ -n "$CUR_BE" ] && docker tag "$PREV_BE" "$CUR_BE"
+            [ -n "$PREV_FE" ] && [ -n "$CUR_FE" ] && docker tag "$PREV_FE" "$CUR_FE"
             docker compose -f "$COMPOSE" up -d
             exit 1
           fi
