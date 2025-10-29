@@ -1,0 +1,225 @@
+name: Build & Deploy QA
+
+on:
+  push:
+    branches: [ "qa" ]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - ".github/workflows/qa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  QA_API_URL: https://qa-applicationmanager.ned-it.de
+
+concurrency:
+  group: qa-deploy
+  cancel-in-progress: true
+
+jobs:
+  build-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR (for push)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta (backend)
+        id: meta_be
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/appmanager-backend
+          tags: |
+            type=raw,value=qa
+            type=sha
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta_be.outputs.tags }}
+          labels: ${{ steps.meta_be.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Persist backend digest
+        run: echo "${{ steps.meta_be.outputs.digest }}" > backend.digest
+
+      - name: Upload backend digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-digest-backend
+          path: backend.digest
+
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR (for push)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta (frontend)
+        id: meta_fe
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/appmanager-frontend
+          tags: |
+            type=raw,value=qa
+            type=sha
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          # keine build-args mehr nötig; API-URL wird zur Laufzeit gesetzt
+          tags: ${{ steps.meta_fe.outputs.tags }}
+          labels: ${{ steps.meta_fe.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Persist frontend digest
+        run: echo "${{ steps.meta_fe.outputs.digest }}" > frontend.digest
+
+      - name: Upload frontend digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-digest-frontend
+          path: frontend.digest
+
+  deploy-qa:
+    needs: [ build-backend, build-frontend ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: Deploy with health check & auto-rollback
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          # Optional: Falls dein NPM-Container einen festen Namen hat, hier setzen:
+          # NPM_CONTAINER_OVERRIDE: nginx-proxy-app-1
+        run: |
+          # Variablen in die Remote-Session übergeben; Heredoc verhindert Local-Shell-Expansion
+          ssh -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" "REGISTRY_USER='$REGISTRY_USER' GHCR_TOKEN='$GHCR_TOKEN' QA_URL='${{ env.QA_API_URL }}' bash -s" <<'EOSH'
+          set -e
+
+          COMPOSE="/srv/docker/qa/applicationmanager/compose/docker-compose.qa.yml"
+
+          # Vorherige Images (ID) und aktuell verwendete Image-Namen sichern
+          PREV_BACKEND=$(docker inspect -f '{{.Image}}' qa-appmanager-backend 2>/dev/null || true)
+          PREV_FRONTEND=$(docker inspect -f '{{.Image}}' qa-appmanager-frontend 2>/dev/null || true)
+          CUR_BACKEND_NAME=$(docker inspect -f '{{.Config.Image}}' qa-appmanager-backend 2>/dev/null || true)
+          CUR_FRONTEND_NAME=$(docker inspect -f '{{.Config.Image}}' qa-appmanager-frontend 2>/dev/null || true)
+          echo "Prev IDs: BACKEND=$PREV_BACKEND FRONTEND=$PREV_FRONTEND"
+          echo "Current tags: BACKEND=$CUR_BACKEND_NAME FRONTEND=$CUR_FRONTEND_NAME"
+
+          # Login & Update
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+          docker compose -f "$COMPOSE" pull
+          docker compose -f "$COMPOSE" up -d
+
+          # -------- 1) Interne Healthchecks (ohne NPM) --------
+          echo "Warte auf Container (intern)…"
+          fe_ok=false
+          be_ok=false
+          for i in {1..24}; do
+            if docker exec qa-appmanager-frontend sh -lc 'wget -qO- http://127.0.0.1/ >/dev/null'; then
+              fe_ok=true
+            else
+              fe_ok=false
+            fi
+
+            if docker exec qa-appmanager-backend sh -lc 'wget -qO- http://127.0.0.1:5000/api/health 2>/dev/null' | grep -q '"status":"ok"'; then
+              be_ok=true
+            else
+              be_ok=false
+            fi
+
+            if $fe_ok && $be_ok; then
+              echo "Interne Checks: OK"
+              break
+            fi
+            sleep 5
+          done
+
+          if ! $fe_ok || ! $be_ok; then
+            echo "Container intern nicht ready -> ROLLBACK"
+            if [ -n "$PREV_BACKEND" ] && [ -n "$CUR_BACKEND_NAME" ]; then docker tag "$PREV_BACKEND" "$CUR_BACKEND_NAME"; fi
+            if [ -n "$PREV_FRONTEND" ] && [ -n "$CUR_FRONTEND_NAME" ]; then docker tag "$PREV_FRONTEND" "$CUR_FRONTEND_NAME"; fi
+            docker compose -f "$COMPOSE" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
+            exit 1
+          fi
+
+          # -------- 2) Nginx Proxy Manager kurz neu starten (Upstream/DNS-Refresh) --------
+          set +e
+          NPM_CONTAINER="$NPM_CONTAINER_OVERRIDE"
+          if [ -z "$NPM_CONTAINER" ]; then
+            NPM_CONTAINER=$(docker ps --format '{{.Names}} {{.Image}}' \
+              | grep -E -m1 'nginx-proxy|jc21/nginx-proxy-manager' \
+              | awk '{print $1}')
+          fi
+          set -e
+
+          if [ -n "$NPM_CONTAINER" ]; then
+            echo "Neustart NPM ($NPM_CONTAINER)…"
+            docker restart "$NPM_CONTAINER" || true
+            sleep 5
+          else
+            echo "Hinweis: Kein NPM-Container automatisch gefunden – überspringe Restart."
+          fi
+
+          # -------- 3) Externe Healthchecks (über Domain/HTTPS) --------
+          echo "Externe Healthchecks…"
+          ok_backend=false
+          ok_front=false
+          for i in {1..24}; do
+            if curl -fsS "$QA_URL/api/health" | grep -q '"status":"ok"'; then
+              ok_backend=true
+            else
+              ok_backend=false
+            fi
+
+            if curl -fsSIL "$QA_URL/" | head -n1 | grep -q ' 200 '; then
+              ok_front=true
+            else
+              ok_front=false
+            fi
+
+            $ok_backend && $ok_front && break
+            sleep 5
+          done
+
+          if ! $ok_backend || ! $ok_front; then
+            echo "Deploy unhealthy -> ROLLBACK"
+            if [ -n "$PREV_BACKEND" ] && [ -n "$CUR_BACKEND_NAME" ]; then docker tag "$PREV_BACKEND" "$CUR_BACKEND_NAME"; fi
+            if [ -n "$PREV_FRONTEND" ] && [ -n "$CUR_FRONTEND_NAME" ]; then docker tag "$PREV_FRONTEND" "$CUR_FRONTEND_NAME"; fi
+            docker compose -f "$COMPOSE" up -d --no-build --no-deps --pull never qa-appmanager-backend qa-appmanager-frontend
+            exit 1
+          fi
+
+          echo "Deploy healthy"
+          EOSH

@@ -1,6 +1,6 @@
 // src/pages/Users.js
 import React, { useEffect, useState } from 'react';
-import api from '../api'; // Stelle sicher, dass der Pfad korrekt ist
+import { api } from '../api'; // Stelle sicher, dass der Pfad korrekt ist
 
 export default function Users() {
     const [users, setUsers] = useState([]);

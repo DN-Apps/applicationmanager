@@ -1,114 +1,115 @@
 import React, { useState, useEffect } from 'react';
-import { getApplications, getAppConfig } from '../api';
+import { getApplications, getTables, getRows, createRow, updateRow, deleteRow } from '../api';
 import './Applications.css';
 
 export default function Applications() {
     const [apps, setApps] = useState([]);
     const [selectedApp, setSelectedApp] = useState(null);
-    const [configData, setConfigData] = useState({ columns: [], rows: [] });
-    const [selectedTab, setSelectedTab] = useState(null);
+
+    const [tables, setTables] = useState([]);
+    const [selectedTable, setSelectedTable] = useState(null);
+
+    const [columns, setColumns] = useState([]);
+    const [pk, setPk] = useState('id');
+    const [rows, setRows] = useState([]);
+
     const [loading, setLoading] = useState(false);
 
+    // Apps laden
     useEffect(() => {
-        loadApplications();
+        (async () => {
+            try {
+                const { data } = await getApplications();
+                setApps(data);
+            } catch (e) {
+                console.error('Fehler beim Laden der Anwendungen:', e);
+            }
+        })();
     }, []);
 
-    const loadApplications = async () => {
-        try {
-            const { data } = await getApplications();
-            setApps(data);
-        } catch (err) {
-            console.error('Fehler beim Laden der Anwendungen:', err);
-        }
-    };
-
-    const handleAppClick = async (app) => {
-        setSelectedApp(app);
+    // Tabelle laden
+    const loadTable = async (appKey, tableName) => {
+        if (!appKey || !tableName) return;
         setLoading(true);
-        setSelectedTab(null);
         try {
-            const response = await getAppConfig(app.key);
-            const { columns, rows } = response.data;
-            setConfigData({ columns, rows });
-
-            const keys = rows.map(r => r.config_key).filter(Boolean);
-            if (keys.length > 0) {
-                setSelectedTab(keys[0]);
-            }
-        } catch (err) {
-            console.error('Fehler beim Laden der Konfiguration:', err);
-            setConfigData({ columns: [], rows: [] });
+            const { data } = await getRows(appKey, tableName); // { columns, primaryKey, rows }
+            setColumns(data.columns || []);
+            setPk(data.primaryKey || 'id');
+            setRows(Array.isArray(data.rows) ? data.rows : []);
+        } catch (e) {
+            console.error('Fehler beim Laden der Zeilen:', e);
         } finally {
             setLoading(false);
         }
     };
 
-    const handleSave = async (row) => {
-        const isNew = typeof row.id === 'string' && row.id.startsWith('temp-');
-
-        const method = isNew ? 'POST' : 'PUT';
-        const url = isNew
-            ? `http://localhost:5000/api/applications/${selectedApp.key}/config`
-            : `http://localhost:5000/api/applications/${selectedApp.key}/config/${row.id}`;
+    // Klick auf App → Tabellen laden, 1. Tabelle aktivieren
+    const handleAppClick = async (app) => {
+        setSelectedApp(app);
+        setSelectedTable(null);
+        setColumns([]); setRows([]);
 
         try {
-            const payload = { ...row };
-            if (isNew) delete payload.id; // <-- temporäre ID entfernen
+            const { data } = await getTables(app.key);
+            // robust normalisieren (falls Backend-Keys anders heißen)
+            const norm = (data || []).map(t => ({
+                name: t.name ?? t.table_name,
+                label: t.label ?? t.display_name ?? t.name ?? t.table_name,
+                primaryKey: t.primaryKey ?? t.primary_key_col ?? 'id',
+                readOnly: !!(t.readOnly ?? t.read_only),
+            })).filter(t => !!t.name);
 
-            const response = await fetch(url, {
-                method,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-
-            if (!response.ok) throw new Error('Fehler beim Speichern');
-
-            const result = await response.json();
-
-            setConfigData(prev => {
-                const updatedRows = prev.rows.map(r =>
-                    r.id === row.id
-                        ? { ...row, id: result.id } // echte ID ersetzen
-                        : r
-                );
-                return { ...prev, rows: updatedRows };
-            });
-        } catch (err) {
-            console.error('Fehler beim Speichern:', err);
+            setTables(norm);
+            if (norm.length) {
+                setSelectedTable(norm[0].name);
+                loadTable(app.key, norm[0].name);
+            }
+        } catch (e) {
+            console.error('Fehler beim Laden der Tabellen:', e);
         }
+    };
+
+    const handleTabClick = (t) => {
+        setSelectedTable(t.name);
+        loadTable(selectedApp.key, t.name);
     };
 
     const handleAdd = () => {
-        if (!selectedTab) {
-            alert("Bitte zuerst einen Tab auswählen, um dort einen Eintrag hinzuzufügen.");
-            return;
-        }
-
-        const tempId = `temp-${Date.now()}-${Math.random()}`;
-        const newRow = { id: tempId, config_key: selectedTab };
-        configData.columns.forEach(col => {
-            if (col !== 'id' && col !== 'config_key') newRow[col] = '';
-        });
-
-        setConfigData(prev => ({
-            ...prev,
-            rows: [...prev.rows, newRow]
-        }));
+        if (!selectedTable || columns.length === 0) return;
+        const tempId = `temp-${Date.now()}`;
+        const empty = Object.fromEntries(columns.map(c => [c, c === pk ? tempId : '']));
+        setRows(prev => [...prev, empty]);
     };
 
-    const handleDelete = async (id) => {
-        if (!window.confirm('Diesen Eintrag wirklich löschen?')) return;
+    const handleSave = async (row) => {
+        const idVal = row[pk];
+        const data = { ...row };
+        delete data[pk];
+
         try {
-            await fetch(`/api/applications/${selectedApp.key}/config/${id}`, {
-                method: 'DELETE'
-            });
-            setConfigData(prev => ({
-                ...prev,
-                rows: prev.rows.filter(row => row.id !== id)
-            }));
-        } catch (err) {
-            console.error('Fehler beim Löschen:', err);
+            if (String(idVal).startsWith('temp-')) {
+                const res = await createRow(selectedApp.key, selectedTable, data);
+                const newId = res.data.id;
+                setRows(prev => prev.map(r => r[pk] === idVal ? { ...r, [pk]: newId } : r));
+            } else {
+                await updateRow(selectedApp.key, selectedTable, idVal, data);
+            }
+        } catch (e) {
+            console.error('Fehler beim Speichern:', e);
+        }
+    };
+
+    const handleDelete = async (row) => {
+        const idVal = row[pk];
+        try {
+            if (String(idVal).startsWith('temp-')) {
+                setRows(prev => prev.filter(r => r[pk] !== idVal));
+            } else {
+                await deleteRow(selectedApp.key, selectedTable, idVal);
+                setRows(prev => prev.filter(r => r[pk] !== idVal));
+            }
+        } catch (e) {
+            console.error('Fehler beim Löschen:', e);
         }
     };
 
@@ -118,7 +119,7 @@ export default function Applications() {
                 <h3>Anwendungen</h3>
                 {apps.map(app => (
                     <button
-                        key={app.id}
+                        key={app.key} // eindeutiger key
                         className={`app-btn ${selectedApp?.key === app.key ? 'active' : ''}`}
                         onClick={() => handleAppClick(app)}
                     >
@@ -128,58 +129,51 @@ export default function Applications() {
             </div>
 
             <div className="main">
-                {loading && <p>Lade Konfiguration...</p>}
-
-                {!loading && selectedApp && (
+                {selectedApp && (
                     <>
-                        <h2>{selectedApp.name} – Konfiguration</h2>
+                        <h2>{selectedApp.name}</h2>
+
                         <div className="tabs">
-                            {[...new Set(configData.rows.map(row => row.config_key))].map(key => (
+                            {tables.map(t => (
                                 <button
-                                    key={key}
-                                    className={`tab-btn ${selectedTab === key ? 'active' : ''}`}
-                                    onClick={() => setSelectedTab(key)}
+                                    key={t.name} // eindeutiger key
+                                    className={`tab-btn ${selectedTable === t.name ? 'active' : ''}`}
+                                    onClick={() => handleTabClick(t)}
                                 >
-                                    {key}
+                                    {t.label}
                                 </button>
                             ))}
+                            <button onClick={handleAdd} style={{ marginLeft: 'auto' }}>➕ Neuer Eintrag</button>
                         </div>
-                        <button onClick={handleAdd}>➕ Neuer Eintrag</button>
 
-                        <div className="config-details">
-                            {configData.rows
-                                .filter(row => row.config_key === selectedTab || selectedTab === null)
-                                .map((conf, index) => (
-                                    <div key={conf.id || index} className="config-entry">
-                                        {Object.entries(conf).map(([key, value]) =>
-                                            key === 'id' ? null : (
-                                                <div key={key}>
-                                                    <strong>{key}:</strong>{' '}
+                        {loading && <p>Lade…</p>}
+
+                        {!loading && selectedTable && (
+                            <div className="config-details">
+                                {rows.map((r, idx) => (
+                                    <div key={r[pk] ?? `row-${idx}`} className="config-entry">
+                                        {columns.map(c => (
+                                            c === pk ? null : (
+                                                <div key={`${idx}-${c}`}>
+                                                    <strong>{c}:</strong>{' '}
                                                     <input
-                                                        type="text"
-                                                        value={value || ''}
-                                                        onChange={(e) => {
+                                                        value={r[c] ?? ''}
+                                                        onChange={e => {
                                                             const val = e.target.value;
-                                                            setConfigData(prev => {
-                                                                const updatedRows = prev.rows.map(r =>
-                                                                    r.id === conf.id
-                                                                        ? { ...r, [key]: val }
-                                                                        : r
-                                                                );
-                                                                return { ...prev, rows: updatedRows };
-                                                            });
+                                                            setRows(prev =>
+                                                                prev.map((x, i) => i === idx ? { ...x, [c]: val } : x)
+                                                            );
                                                         }}
                                                     />
                                                 </div>
                                             )
-                                        )}
-                                        <button onClick={() => handleSave(conf)}>💾 Speichern</button>
-                                        {conf.id && !String(conf.id).startsWith('temp-') && (
-                                            <button onClick={() => handleDelete(conf.id)}>🗑️ Löschen</button>
-                                        )}
+                                        ))}
+                                        <button onClick={() => handleSave(r)}>💾 Speichern</button>
+                                        <button onClick={() => handleDelete(r)}>🗑️ Löschen</button>
                                     </div>
                                 ))}
-                        </div>
+                            </div>
+                        )}
                     </>
                 )}
             </div>

@@ -1,23 +1,21 @@
 // src/api.js
-import axios from 'axios';
+import axios from "axios";
+import { API_BASE_URL } from "./config";
 
-const api = axios.create({
-    baseURL: process.env.REACT_APP_API_URL || 'http://localhost:5000/api',
+// Zentrale Axios-Instanz: /api hängt an der baseURL
+export const api = axios.create({
+  baseURL: `${API_BASE_URL}/api`,
 });
 
-// ⬇️ JWT-Token automatisch anhängen
-api.interceptors.request.use((config) => {
-    const token = localStorage.getItem('token');
-    if (token) {
-        config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-}, (error) => {
-    return Promise.reject(error);
-});
+// Apps & Tabellen
+export const getApplications = () => api.get("/applications");
+export const getTables = (appKey) => api.get(`/applications/${appKey}/tables`);
 
-// Vorhandene API-Funktionen
-export const getApplications = () => api.get('/applications');
-export const getAppConfig = (appKey) => api.get(`/applications/${appKey}/config`);
-
-export default api;
+// Rows einer Tabelle
+export const getRows = (appKey, table) => api.get(`/applications/${appKey}/tables/${table}/rows`);
+export const createRow = (appKey, table, data) =>
+  api.post(`/applications/${appKey}/tables/${table}/rows`, data);
+export const updateRow = (appKey, table, id, data) =>
+  api.put(`/applications/${appKey}/tables/${table}/rows/${id}`, data);
+export const deleteRow = (appKey, table, id) =>
+  api.delete(`/applications/${appKey}/tables/${table}/rows/${id}`);

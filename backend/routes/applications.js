@@ -1,158 +1,231 @@
+// backend/routes/applications.js
 const express = require('express');
 const router = express.Router();
-const db = require('../db');
 
-// GET: Alle Applikationen
-router.get('/', async (req, res) => {
-    try {
-        const [apps] = await db.query(`
-            SELECT 
-              id,
-              app_key AS appKey,
-              display_name AS displayName,
-              schema_name AS schemaName,
-              is_active AS isActive
-            FROM managed_applications
-            ORDER BY display_name
-        `);
+// Registry-DB (enthält managed_applications / managed_tables)
+const registryDb = require('../db');          // mysql2/promise-Pool
+// Ziel-DB Pools pro App (Multi-DB)
+const { getPool } = require('../dbMulti');
 
-        res.json(apps.map(app => ({
-            id: app.id,
-            key: app.appKey,
-            name: app.displayName,
-            schema: app.schemaName,
-            active: app.isActive
-        })));
+// ---- helpers ----
+const IDENT_RX = /^[A-Za-z0-9_]+$/;
+const safeIdent = (s) => IDENT_RX.test(s || '') ? s : null;
+const qIdent = (s) => `\`${s}\``;
+const toNullIfEmpty = (v) => (v === '' ? null : v);
 
-    } catch (err) {
-        console.error('MySQL Error:', err);
-        res.status(500).json({
-            error: 'Database query failed',
-            details: err.sqlMessage,
-            sql: err.sql
-        });
-    }
+// App + Table aus Registry (Whitelist) holen
+async function getAppAndTable(appKey, tableName = null) {
+  const [[app]] = await registryDb.query(
+    'SELECT * FROM managed_applications WHERE app_key=? AND is_active=1',
+    [appKey]
+  );
+  if (!app) return { error: 'Application not registered or inactive', status: 404 };
+
+  if (!tableName) return { app };
+
+  const [[tbl]] = await registryDb.query(
+    'SELECT * FROM managed_tables WHERE app_id=? AND table_name=?',
+    [app.id, tableName]
+  );
+  if (!tbl) return { error: 'Table not registered for this app', status: 404 };
+
+  // Identifier absichern
+  if (!safeIdent(app.schema_name) || !safeIdent(tbl.table_name) || !safeIdent(tbl.primary_key_col)) {
+    return { error: 'Invalid identifiers configured', status: 500 };
+  }
+  return { app, tbl };
+}
+
+// ---- routes ----
+
+// Apps inkl. ihrer Tabellen (aus Registry)
+router.get('/', async (_req, res) => {
+  try {
+    const [apps] = await registryDb.query(
+      `SELECT id, app_key, display_name, schema_name, is_active
+         FROM managed_applications
+        WHERE is_active=1
+        ORDER BY display_name`
+    );
+    const [tables] = await registryDb.query(
+      `SELECT app_id, table_name, display_name
+         FROM managed_tables
+        ORDER BY display_name`
+    );
+
+    const grouped = apps.map(a => ({
+      id: a.id,
+      key: a.app_key,
+      name: a.display_name,
+      schema: a.schema_name,
+      tables: tables
+        .filter(t => t.app_id === a.id)
+        .map(t => ({ name: t.table_name, label: t.display_name }))
+    }));
+    res.json(grouped);
+  } catch (err) {
+    console.error('[APPS][LIST]', err);
+    res.status(500).json({ error: 'Database query failed' });
+  }
 });
 
-// GET: Konfiguration einer spezifischen App
-router.get('/:appKey/config', async (req, res) => {
+// Tabellenliste einer App (Frontend erwartet name/label/primaryKey/readOnly)
+router.get('/:appKey/tables', async (req, res) => {
+  try {
     const { appKey } = req.params;
+    const { app, error, status } = await getAppAndTable(appKey);
+    if (error) return res.status(status).json({ error });
 
-    try {
-        const [apps] = await db.query(`
-            SELECT schema_name, config_table 
-            FROM managed_applications 
-            WHERE app_key = ?
-        `, [appKey]);
+    const [tables] = await registryDb.query(
+      `SELECT table_name, display_name, primary_key_col, read_only
+         FROM managed_tables
+        WHERE app_id=?
+        ORDER BY display_name`,
+      [app.id]
+    );
 
-        if (apps.length === 0) {
-            return res.status(404).json({ error: 'Application not registered' });
-        }
+    const normalized = tables.map(t => ({
+      name: t.table_name,
+      label: t.display_name,
+      primaryKey: t.primary_key_col,
+      readOnly: !!t.read_only,
+    }));
 
-        const { schema_name, config_table } = apps[0];
-
-        // Dynamische Spalten holen
-        const [columns] = await db.query(`SHOW COLUMNS FROM \`${schema_name}\`.\`${config_table}\``);
-        const [rows] = await db.query(`SELECT * FROM \`${schema_name}\`.\`${config_table}\``);
-
-        res.json({
-            columns: columns.map(col => col.Field), // z. B. ["id", "config_key", "preisWoche", ...]
-            rows
-        });
-    } catch (err) {
-        console.error('Fehler beim Abrufen der Konfiguration:', err);
-        res.status(500).json({ error: 'Fehler beim Laden der Konfiguration', details: err.message });
-    }
+    res.json(normalized);
+  } catch (err) {
+    console.error('[TABLES][LIST]', err);
+    res.status(500).json({ error: 'Failed to load tables' });
+  }
 });
 
-router.put('/:appKey/config/:id', async (req, res) => {
-    const { appKey, id } = req.params;
-    const data = req.body;
-    console.log('PUT request received:', req.params.appKey, req.params.id);
+// Spalten + Daten einer Tabelle (Ziel-DB!)
+router.get('/:appKey/tables/:table/rows', async (req, res) => {
+  const { appKey, table } = req.params;
+  try {
+    const { app, tbl, error, status } = await getAppAndTable(appKey, table);
+    if (error) return res.status(status).json({ error });
 
-    try {
-        const [[app]] = await db.query(`
-            SELECT schema_name, config_table 
-            FROM managed_applications 
-            WHERE app_key = ?
-        `, [appKey]);
+    const pool = await getPool({
+      host: app.db_host, port: app.db_port,
+      user: app.db_user, pass: app.db_pass
+    });
 
-        if (!app) return res.status(404).json({ error: 'App not found' });
+    const [cols] = await pool.query(
+      `SHOW COLUMNS FROM ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)}`
+    );
+    const [rows] = await pool.query(
+      `SELECT * FROM ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)} LIMIT 1000`
+    );
 
-        const keys = Object.keys(data).filter(k => k !== 'id');
-        const values = keys.map(k => data[k]);
-
-        const setClause = keys.map(k => `\`${k}\` = ?`).join(', ');
-        const sql = `UPDATE \`${app.schema_name}\`.\`${app.config_table}\` SET ${setClause} WHERE id = ?`;
-
-        await db.query(sql, [...values, id]);
-        res.json({ success: true });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Update failed', details: err.message });
-    }
+    res.json({
+      columns: cols.map(c => c.Field),
+      primaryKey: tbl.primary_key_col,
+      rows
+    });
+  } catch (err) {
+    console.error('[ROWS][LIST]', err);
+    res.status(500).json({ error: 'Failed to load rows', details: err.sqlMessage || err.message });
+  }
 });
 
-// POST: Neuen Konfigurationseintrag hinzufügen
-router.post('/:appKey/config', async (req, res) => {
-    const { appKey } = req.params;
-    const newData = req.body;
+// CREATE (Ziel-DB)
+router.post('/:appKey/tables/:table/rows', async (req, res) => {
+  const { appKey, table } = req.params;
+  const incoming = req.body || {};
+  try {
+    const { app, tbl, error, status } = await getAppAndTable(appKey, table);
+    if (error) return res.status(status).json({ error });
+    if (tbl.read_only) return res.status(403).json({ error: 'Table is read-only' });
 
-    try {
-        const [apps] = await db.query(`
-        SELECT schema_name, config_table 
-        FROM managed_applications 
-        WHERE app_key = ?
-      `, [appKey]);
+    const pool = await getPool({
+      host: app.db_host, port: app.db_port,
+      user: app.db_user, pass: app.db_pass
+    });
 
-        if (apps.length === 0) {
-            return res.status(404).json({ error: 'Application not found' });
-        }
+    // Spalten ermitteln
+    const [cols] = await pool.query(
+      `SHOW COLUMNS FROM ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)}`
+    );
+    const allowed = new Set(cols.map(c => c.Field));
 
-        const { schema_name, config_table } = apps[0];
-        const [result] = await db.query(
-            `INSERT INTO \`${schema_name}\`.\`${config_table}\` SET ?`,
-            [newData]
-        );
-
-        res.status(201).json({ id: result.insertId });
-    } catch (err) {
-        console.error('Fehler beim Einfügen:', err);
-        res.status(500).json({ error: 'Einfügen fehlgeschlagen', details: err.message });
+    // Payload bauen: nur existierende Spalten, PK weglassen, '' -> null
+    const payload = {};
+    for (const [k, v] of Object.entries(incoming)) {
+      if (!allowed.has(k)) continue;
+      if (k === tbl.primary_key_col) continue;
+      payload[k] = toNullIfEmpty(v);
     }
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({ error: 'No valid columns in payload' });
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)} SET ?`,
+      [payload]
+    );
+    res.status(201).json({ id: result.insertId });
+  } catch (err) {
+    console.error('[ROW][CREATE]', err);
+    res.status(500).json({ error: 'Insert failed', details: err.sqlMessage || err.message });
+  }
 });
 
-// DELETE: Konfigurationseintrag löschen
-router.delete('/:appKey/config/:id', async (req, res) => {
-    const { appKey, id } = req.params;
+// UPDATE (Ziel-DB)
+router.put('/:appKey/tables/:table/rows/:id', async (req, res) => {
+  const { appKey, table, id } = req.params;
+  const incoming = req.body || {};
+  try {
+    const { app, tbl, error, status } = await getAppAndTable(appKey, table);
+    if (error) return res.status(status).json({ error });
+    if (tbl.read_only) return res.status(403).json({ error: 'Table is read-only' });
 
-    try {
-        const [apps] = await db.query(`
-        SELECT schema_name, config_table 
-        FROM managed_applications 
-        WHERE app_key = ?
-      `, [appKey]);
+    const pool = await getPool({
+      host: app.db_host, port: app.db_port,
+      user: app.db_user, pass: app.db_pass
+    });
 
-        if (apps.length === 0) {
-            return res.status(404).json({ error: 'Application not found' });
-        }
+    const [cols] = await pool.query(
+      `SHOW COLUMNS FROM ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)}`
+    );
+    const allowed = new Set(cols.map(c => c.Field));
 
-        const { schema_name, config_table } = apps[0];
+    const keys = Object.keys(incoming).filter(k => allowed.has(k) && k !== tbl.primary_key_col);
+    if (keys.length === 0) return res.status(400).json({ error: 'No valid columns to update' });
 
-        await db.query(
-            `DELETE FROM \`${schema_name}\`.\`${config_table}\` WHERE id = ?`,
-            [id]
-        );
+    const setSql = keys.map(k => `${qIdent(k)}=?`).join(', ');
+    const vals = keys.map(k => toNullIfEmpty(incoming[k]));
 
-        res.status(204).send();
-    } catch (err) {
-        console.error('Fehler beim Löschen:', err);
-        res.status(500).json({ error: 'Löschen fehlgeschlagen', details: err.message });
-    }
+    const sql = `UPDATE ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)} SET ${setSql} WHERE ${qIdent(tbl.primary_key_col)}=?`;
+    await pool.query(sql, [...vals, id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[ROW][UPDATE]', err);
+    res.status(500).json({ error: 'Update failed', details: err.sqlMessage || err.message });
+  }
 });
 
+// DELETE (Ziel-DB)
+router.delete('/:appKey/tables/:table/rows/:id', async (req, res) => {
+  const { appKey, table, id } = req.params;
+  try {
+    const { app, tbl, error, status } = await getAppAndTable(appKey, table);
+    if (error) return res.status(status).json({ error });
+    if (tbl.read_only) return res.status(403).json({ error: 'Table is read-only' });
 
+    const pool = await getPool({
+      host: app.db_host, port: app.db_port,
+      user: app.db_user, pass: app.db_pass
+    });
 
-
+    await pool.query(
+      `DELETE FROM ${qIdent(app.schema_name)}.${qIdent(tbl.table_name)} WHERE ${qIdent(tbl.primary_key_col)}=?`,
+      [id]
+    );
+    res.status(204).send();
+  } catch (err) {
+    console.error('[ROW][DELETE]', err);
+    res.status(500).json({ error: 'Delete failed', details: err.sqlMessage || err.message });
+  }
+});
 
 module.exports = router;

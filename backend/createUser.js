@@ -18,4 +18,4 @@ async function createUser(username, plainPassword) {
 }
 
 // ⬇️ Hier Benutzername + Passwort eintragen:
-createUser('benutzer', 'passwort');
+//createUser('benutzer', 'passwort');
