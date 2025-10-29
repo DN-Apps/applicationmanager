@@ -1,9 +1,9 @@
 // src/SetAdminCredentials.js
 import { useEffect, useState } from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from "../config";
 
 function SetAdminCredentials() {
-    const API_URL = process.env.REACT_APP_API_URL;
     console.log('SetAdminCredentials mounted');
 
     const [username, setUsername] = useState('');
@@ -38,7 +38,7 @@ function SetAdminCredentials() {
 
         try {
             // username wird mitgesendet; Backend kann ihn zur Absicherung gegenprüfen
-            await axios.post(`${API_URL}/api/admin-invites/accept`, { token, password, username });
+            await axios.post(`${API_BASE_URL}/api/admin-invites/accept`, { token, password, username });
             setMsg('✅ Passwort gesetzt. Du kannst dich jetzt einloggen.');
             setPassword(''); setPassword2('');
         } catch (err) {
