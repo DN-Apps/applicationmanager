@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
+import { API_BASE_URL } from "../config";
 
 function Login({ onLogin }) {
     const [username, setUsername] = useState('');
@@ -10,7 +11,6 @@ function Login({ onLogin }) {
     const [inviteUser, setInviteUser] = useState('');
     const [inviteMsg, setInviteMsg] = useState('');
     const [loading, setLoading] = useState(false);
-    const API_URL = process.env.REACT_APP_API_URL;
     const navigate = useNavigate();
     const location = useLocation();
     // Falls du vorher durch einen Guard umgeleitet wurdest, geht's dahin zurück; sonst "/"
@@ -22,7 +22,7 @@ function Login({ onLogin }) {
         if (loading) return;
         setLoading(true);
         try {
-            const res = await axios.post(`${API_URL}/api/auth/login`, { username, password });
+            const res = await await axios.post(`${API_BASE_URL}/api/auth/login`, { username, password });
             localStorage.setItem('token', res.data.token);
             onLogin?.();
             navigate(from, { replace: true }); // <<< WICHTIG: weiterleiten
@@ -37,7 +37,7 @@ function Login({ onLogin }) {
         e.preventDefault();
         setInviteMsg('Sende Anfrage…');
         try {
-            await axios.post(`${API_URL}/api/admin-invites`, { username: inviteUser });
+            await await axios.post(`${API_BASE_URL}/api/admin-invites`, { username: inviteUser });
             setInviteMsg('✅ Anfrage erstellt. E-Mail wurde an daniel-nedic@hotmail.de gesendet.');
             setInviteUser('');
         } catch (err) {
